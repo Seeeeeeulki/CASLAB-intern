@@ -5,11 +5,11 @@
 #include <signal.h>
 #include <papi.h>
 
-#define WINDOW 3
-#define INIT_RATIO 0.6
-#define TARGET 0.1724
+#define WINDOW 10	//decision interval
+#define INIT_RATIO 0.6	//initial ratio of batch phase-in
+#define TARGET 0.8	//target QoS, 0~1
 
-#define PID 24373 
+#define PID 24373	//server PID
 
 int fatal(char *s){
 	perror(s);
@@ -17,7 +17,7 @@ int fatal(char *s){
 }
 
 int main(){
-	pid_t pid[4];
+	pid_t pid[5];
 	float real_time, proc_time, ipc;
 	long long ins;
 	int retval;
@@ -26,81 +26,95 @@ int main(){
 		if((pid[i] = fork())==0){
 			switch(i){
 				case 0:
-					//execlp("docker","docker", "run","--cpus=1","--cpuset-cpus=1","-e", "RECORDCOUNT=1000000","-e", "OPERATIONCOUNT=1000000", "--name","cassandra-client", "--net","serving_network","cloudsuite/data-serving:client","cassandra-server",NULL);
-					execlp("ls","ls", NULL);
-					//execlp("taskset","taskset","-c","2","./batch/lbm_base.Xeon-gcc4.3","3000","reference.dat","0","0", NULL);
+					execlp("docker","docker", "run","--cpus=1","--cpuset-cpus=1","-e", "RECORDCOUNT=1000000","-e", "OPERATIONCOUNT=1000000", "--name","cassandra-client", "--net","serving_network","cloudsuite/data-serving:client","cassandra-server",NULL);
+					//execlp("ls","ls", NULL);
 					break;
 				case 1:
-					execlp("ls","ls", NULL);
-					//execlp("taskset","taskset","-c","2","./batch/lbm_base.Xeon-gcc4.3","3000","reference.dat","0","0", NULL);
+					//execlp("ls","ls", NULL);
+					execlp("taskset","taskset","-c","2","./batch/lbm_base.Xeon-gcc4.3","3000","reference.dat","0","0", NULL);
 					break;
 				case 2:
-					execlp("ls","ls", NULL);
+					//execlp("ls","ls", NULL);
+					execlp("taskset","taskset","-c","3","./batch/lbm_base.Xeon-gcc4.3","3000","reference.dat","0","0", NULL);
 					//execlp("taskset","taskset","-c","3","./batch/libquantum_base.Xeon-gcc4.3","1397","8", NULL);
 					break;
 				case 3:
-					execlp("ls","ls", NULL);
+					//execlp("ls","ls", NULL);
 					//execlp("taskset","taskset","-c","4","./batch/soplex_base.Xeon-gcc4.3","-s1","-e","-m45000", "./batch/pds-50.mps", NULL);
+					execlp("taskset","taskset","-c","4","./batch/lbm_base.Xeon-gcc4.3","3000","reference.dat","0","0", NULL);
 					break;
 				case 4:
-					execlp("ls","ls", NULL);
+					//execlp("ls","ls", NULL);
 					//execlp("taskset","taskset","-c","5","./batch/mcf_base.Xeon-gcc4.3","./batch/inp.in", NULL);
+					execlp("taskset","taskset","-c","5","./batch/lbm_base.Xeon-gcc4.3","3000","reference.dat","0","0", NULL);
 					break;
 			}
 		}
 	}
 	
-	sleep(1);	//consider time for start
+	sleep(10);	//consider time for start
 
-	/*
-	if((retval = PAPI_ipc(&real_time, &proc_time, &ins, &ipc)) < PAPI_OK ) {
-		printf("[start] Could not get PAPI_ipc value: PAPI error %d\n", retval);
-		exit(1);
-	}
-	*/
+	//initialize to use PAPI
 	int EventSet = PAPI_NULL;
 	PAPI_library_init(PAPI_VER_CURRENT);
 	PAPI_create_eventset(&EventSet);
 	PAPI_add_event(EventSet, PAPI_TOT_INS);
+
+	//from now, PAPI look server(by server-PID)
 	retval = PAPI_attach(EventSet, (unsigned long)PID);
-	printf("attach error: %d\n", retval);
+	printf("attach return: %d\n", retval);
 
-
+	//PAPI count total cycle, total instruction
 	int Events[2] = {PAPI_TOT_CYC, PAPI_TOT_INS};
 	long long values[2];
 
-	float ratio = INIT_RATIO;
+	float ratio = INIT_RATIO; //phase in ratio, out=1-ratio
+	long long cycle, inst;
+	float ipc_out, ipc_in, qos;
 	
 	for(int i=0; i <1000; i++){
-		//PAPI_start(EventSet);
-		//retval = PAPI_attach(EventSet, (unsigned long)pid[3]);
-		//printf("attach error: %d\n", retval);
-		//PAPI_ipc(&real_time, &proc_time, &ins, &ipc);
+		for(int i=0; i<5; i++)
+			printf("pid of child: %d\n",pid[i]);
+		//batch phase out
 		PAPI_start_counters(Events, 2);
 		kill(pid[1],SIGSTOP);
 		kill(pid[2],SIGSTOP);
-		//kill(pid[3],SIGSTOP);
+		kill(pid[3],SIGSTOP);
 		kill(pid[4],SIGSTOP);
-		sleep(ratio * WINDOW);
+		sleep((1-ratio) * WINDOW);
+		PAPI_stop_counters(values, 2);
+		cycle = values[0];
+		inst = values[1];
+		ipc_out = (float)inst / (float)cycle;
+
+		//batch phase in
+		PAPI_start_counters(Events, 2);
 		kill(pid[1],SIGCONT);
 		kill(pid[2],SIGCONT);
-		//kill(pid[3],SIGCONT);
+		kill(pid[3],SIGCONT);
 		kill(pid[4],SIGCONT);
-		sleep((1 - ratio) * WINDOW);
-		//PAPI_detach(EventSet);
-		//PAPI_ipc(&real_time, &proc_time, &ins, &ipc);
-		//printf("detach result: %d\n", EventSet);
-		//printf (" real time : %f\n proc time : %f\n instruction : %lli\n ipc : %f\n", real_time, proc_time, ins, ipc);
-		//ratio = ratio + (TARGET - ipc)/TARGET; 
-		//printf("new ratio : %f\n", ratio);
-		//printf("PID: %d\n",PID);
-		//PAPI_stop(EventSet, values);
+		kill(pid[4],SIGCONT);
+		sleep(ratio * WINDOW);
 		PAPI_stop_counters(values, 2);
-		printf("cycle: %lld\n",values[0]);
-		printf("instruction: %lld\n",values[1]);
+		cycle = values[0];
+		inst = values[1];
+		ipc_in = (float)inst / (float)cycle;
+
+		//calculate new ratio
+		qos = (ratio*ipc_in + (1-ratio)*ipc_out)/ipc_out;
+		ratio = ratio - (TARGET - qos)/TARGET; 
+
+		//Even if strange value appear at ipc, DO NOT AFFECT PROGRAM EXECUTION
+		if (ratio > 0.95 )
+			ratio = 0.95;
+
+		printf("\n========================\n");
+		printf("ipc in : %f\n",ipc_in);
+		printf("ipc out : %f\n",ipc_out);
+		printf("qos: %f\n", qos);
+		printf("new ratio : %f\n", ratio);
 		PAPI_shutdown();
 	}
 
-	//record ipc-result
 	return 0;
 }
